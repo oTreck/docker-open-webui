@@ -17,17 +17,43 @@ services:
               count: all
               capabilities: [gpu]
 
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - BASE_URL=http://localhost:8081/
+      - INSTANCE_NAME=OpenWebUI Search
+    depends_on:
+      - redis
+
+  redis:
+    image: docker.io/valkey/valkey:8-alpine
+    container_name: searxng-redis
+    restart: unless-stopped
+
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
     depends_on:
       - ollama
+      - searxng
     ports:
       - "8080:8080"
     volumes:
       - ./data:/app/backend/data
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
+      - WEBUI_URL=http://localhost:8080
+      - ENABLE_WEB_SEARCH=True
+      - WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>&format=json
+      - WEB_SEARCH_RESULT_COUNT=3
+      - ENABLE_SEARCH_QUERY_GENERATION=True
     restart: unless-stopped
 
 volumes:

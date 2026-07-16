@@ -1,14 +1,35 @@
 services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: rag-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   ollama:
     image: ollama/ollama:latest
-    container_name: ollama
+    container_name: rag-ollama
     restart: unless-stopped
     ports:
-      - "11434:11434"
+      - "${OLLAMA_PORT}:11434"
     volumes:
       - ollama:/root/.ollama
     environment:
-      - OLLAMA_HOST=0.0.0.0:11434
+      OLLAMA_HOST: 0.0.0.0:11434
     deploy:
       resources:
         reservations:
@@ -19,42 +40,110 @@ services:
 
   searxng:
     image: docker.io/searxng/searxng:latest
-    container_name: searxng
+    container_name: rag-searxng
     restart: unless-stopped
     ports:
-      - "8081:8080"
+      - "${SEARXNG_PORT}:8080"
     volumes:
       - ./searxng:/etc/searxng:rw
     environment:
-      - BASE_URL=http://localhost:8081/
-      - INSTANCE_NAME=OpenWebUI Search
+      SEARXNG_BASE_URL: http://localhost:${SEARXNG_PORT}/
     depends_on:
       - redis
 
   redis:
     image: docker.io/valkey/valkey:8-alpine
-    container_name: searxng-redis
+    container_name: rag-searxng-redis
     restart: unless-stopped
 
+  pipelines:
+    image: ghcr.io/open-webui/pipelines:main
+    container_name: rag-pipelines
+    restart: unless-stopped
+    ports:
+      - "${PIPELINES_PORT}:9099"
+    volumes:
+      - ./docker/pipelines:/app/pipelines
+    environment:
+      PIPELINES_DIR: /app/pipelines
+      PIPELINES_REQUIREMENTS_PATH: /app/pipelines/requirements.txt
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      OLLAMA_BASE_URL: http://ollama:11434
+      EMBEDDING_MODEL: nomic-embed-text
+      PIPELINES_API_KEY: ${PIPELINES_API_KEY}
+      CHAT_MODEL: qwen2.5-coder:7b
+    depends_on:
+      - postgres
+      - ollama
+
+  ingester:
+    build:
+      context: ./docker/ingester
+    container_name: rag-ingester
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - ollama
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      OLLAMA_BASE_URL: http://ollama:11434
+      EMBEDDING_MODEL: nomic-embed-text
+    volumes:
+      - ./docker/ingester/app:/app
+      - ./workspace:/workspace
+    working_dir: /app
+    command: ["sleep", "infinity"]
+
+  open-terminal:
+    image: ghcr.io/open-webui/open-terminal:latest
+    container_name: rag-open-terminal
+    restart: unless-stopped
+    environment:
+      OPEN_TERMINAL_API_KEY: ${OPEN_TERMINAL_API_KEY}
+    volumes:
+      - ./workspace:/home/user/workspace
+    expose:
+      - "8000"
+
   open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
+    image: ghcr.io/open-webui/open-webui:v0.10.2
+    container_name: rag-open-webui
+    restart: unless-stopped
+
     depends_on:
       - ollama
       - searxng
+      - open-terminal
+      - pipelines
+      - postgres
+
     ports:
-      - "8080:8080"
+      - "${OPENWEBUI_PORT}:8080"
+
     volumes:
-      - ./data:/app/backend/data
+      - ./data/open-webui:/app/backend/data
+      - ./workspace:/workspace
+
     environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - WEBUI_URL=http://localhost:8080
-      - ENABLE_WEB_SEARCH=True
-      - WEB_SEARCH_ENGINE=searxng
-      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>&format=json
-      - WEB_SEARCH_RESULT_COUNT=3
-      - ENABLE_SEARCH_QUERY_GENERATION=True
-    restart: unless-stopped
+      OLLAMA_BASE_URL: http://ollama:11434
+      WEBUI_URL: http://localhost:${OPENWEBUI_PORT}
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+
+      ENABLE_WEB_SEARCH: "True"
+      WEB_SEARCH_ENGINE: searxng
+      SEARXNG_QUERY_URL: "http://searxng:8080/search?q=<query>&format=json"
+      WEB_SEARCH_RESULT_COUNT: "3"
+      ENABLE_SEARCH_QUERY_GENERATION: "True"
+
+      OPENAI_API_BASE_URL: http://pipelines:9099
+      OPENAI_API_KEY: ${PIPELINES_API_KEY}
 
 volumes:
   ollama:
